@@ -1,11 +1,11 @@
-import React, { useState, useMemo } from 'react';
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../lib/db';
 import { calculatePeriodExpectedRent } from '../lib/financialUtils';
 import { startOfMonth, endOfMonth, format } from 'date-fns';
-import { TrendingUp, TrendingDown, DollarSign, PieChart, Calendar, AlertCircle, Filter, X } from 'lucide-react';
-import { isLeaseActive } from '../lib/leaseUtils';
+import { TrendingUp, TrendingDown, DollarSign, Calendar, AlertCircle, Filter, X } from 'lucide-react';
+
 
 export default function Reports() {
     const { t } = useTranslation();
@@ -15,8 +15,8 @@ export default function Reports() {
     const [endDate, setEndDate] = useState(format(endOfMonth(new Date()), 'yyyy-MM-dd'));
     const [selectedUnitType, setSelectedUnitType] = useState<string>('all');
     const [paymentStatus, setPaymentStatus] = useState<'all' | 'paid' | 'unpaid'>('all');
+    const [selectedFloor, setSelectedFloor] = useState<string>('all');
 
-    // Data
     const leases = useLiveQuery(() => db.leases.toArray());
     const payments = useLiveQuery(() => db.payments.toArray());
     const expenses = useLiveQuery(() => db.expenses.toArray());
@@ -31,7 +31,7 @@ export default function Reports() {
 
     // 1. Filter Units first (Structural Filter)
     const availableFloors = Array.from(new Set(units.map(u => u.floor))).sort();
-    const [selectedFloor, setSelectedFloor] = useState<string>('all');
+
 
     const filteredUnits = units.filter(u => {
         if (selectedUnitType !== 'all' && u.unitType !== selectedUnitType) return false;

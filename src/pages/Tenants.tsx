@@ -23,7 +23,8 @@ export default function Tenants() {
                 id: uuidv4(),
                 name: newTenant.name,
                 phone: newTenant.phone,
-                status: 'active'
+                status: 'active',
+                balance: 0
             });
             setNewTenant({ name: '', phone: '' });
             setShowAddForm(false);
