@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../lib/db';
@@ -7,7 +7,7 @@ import { useAuth } from '../context/AuthContext';
 import { formatDistanceToNow, startOfMonth, endOfMonth, addMonths, subMonths, format } from 'date-fns';
 import EmptyState from '../components/EmptyState';
 import { calculatePeriodExpectedRent } from '../lib/financialUtils';
-import { isLeaseActive } from '../lib/leaseUtils';
+
 
 export default function Dashboard() {
     const { t } = useTranslation();
