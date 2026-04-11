@@ -1,109 +1,84 @@
-import { db, type Lease, type Payment } from './db';
+import { supabase } from './supabase';
+import type { Database } from './database.types';
+
+type Lease = Database['public']['Tables']['leases']['Row'];
+type Payment = Database['public']['Tables']['payments']['Row'];
 
 export interface LeaseFinancials {
     expectedRent: number;
     paidAmount: number;
     balance: number;
+    completePeriods: number;
+    nextDueDate: Date;
+    daysSinceStart: number;
+    daysUntilNextDue: number;
+    isOverdue: boolean;
+    daysOverdue: number;
     lastPaymentDate?: Date;
     status: 'paid' | 'partial' | 'overdue' | 'credit';
 }
 
-// Helper to get days in month
-function getDaysInMonth(date: Date): number {
-    return new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
-}
-
 /**
- * Calculates Expected Rent for a period using STRICT DAILY ACCRUAL.
- * Formula: (Rent * ActiveDays) / DaysInMonth
+ * Calculates financials for a lease using 30-DAY BILLING CYCLE.
+ * Formula: Expected Rent = floor(daysSinceStart / 30) × monthlyRent
+ * 
+ * Rules:
+ * - Rent is due every 30 days from lease start
+ * - Partial periods are NOT counted
+ * - No daily prorating
  */
-export function calculatePeriodExpectedRent(leases: Lease[], startDate: Date, endDate: Date): number {
-    let totalExpected = 0;
-
-    // Normalize range to start/end of days
-    const rangeStart = new Date(startDate); rangeStart.setHours(0, 0, 0, 0);
-    const rangeEnd = new Date(endDate); rangeEnd.setHours(23, 59, 59, 999);
-
-    leases.forEach(lease => {
-        const leaseStart = new Date(lease.startDate); leaseStart.setHours(0, 0, 0, 0);
-        const leaseEnd = lease.endDate ? new Date(lease.endDate) : null;
-        if (leaseEnd) leaseEnd.setHours(23, 59, 59, 999);
-
-        // Optimization: Start checking from the month of the effective start date
-        const effectiveStart = rangeStart > leaseStart ? rangeStart : leaseStart;
-        const effectiveEnd = (leaseEnd && leaseEnd < rangeEnd) ? leaseEnd : rangeEnd;
-
-        if (effectiveStart > effectiveEnd) return;
-
-        let iter = new Date(effectiveStart.getFullYear(), effectiveStart.getMonth(), 1);
-        const endMonthDate = new Date(effectiveEnd.getFullYear(), effectiveEnd.getMonth(), 1);
-
-        while (iter <= endMonthDate) {
-            const currentYear = iter.getFullYear();
-            const currentMonth = iter.getMonth();
-            const daysInMonth = getDaysInMonth(iter);
-
-            // Define the window for this specific month [1st, Last]
-            const monthStart = new Date(currentYear, currentMonth, 1);
-            const monthEnd = new Date(currentYear, currentMonth, daysInMonth); monthEnd.setHours(23, 59, 59, 999);
-
-            // Active Intersection = [Max(Start), Min(End)]
-            const activeStart = (leaseStart > monthStart ? leaseStart : (rangeStart > monthStart ? rangeStart : monthStart));
-
-            let activeEnd = monthEnd;
-            if (leaseEnd && leaseEnd < activeEnd) activeEnd = leaseEnd;
-            if (rangeEnd < activeEnd) activeEnd = rangeEnd;
-
-            if (activeStart <= activeEnd) {
-                // Inclusive days count
-                const durationMs = activeEnd.getTime() - activeStart.getTime();
-                // Add 1 day buffer for inclusive start/end (e.g. 1st to 1st is 1 day)
-                // Use Math.floor and add 1 to handle potential DST oddities safely
-                const activeDays = Math.floor(durationMs / (1000 * 60 * 60 * 24)) + 1;
-
-                // Rent Accrual
-                const monthRent = lease.rentAmount;
-                const dailyRate = monthRent / daysInMonth;
-                totalExpected += (dailyRate * activeDays);
-            }
-
-            // Next month
-            iter.setMonth(iter.getMonth() + 1);
-        }
-    });
-
-    return totalExpected;
-}
-
-/**
- * Calculates financials for a lease given a list of payments.
- * USES DAILY ACCRUAL logic for consistency.
- */
-export function calculateLeaseFinancialsSync(lease: Lease, allPayments: Payment[]): LeaseFinancials {
+export function calculate30DayCycleFinancials(lease: Lease, allPayments: Payment[]): LeaseFinancials {
     // Filter payments for this specific lease
-    const payments = allPayments.filter(p => p.leaseId === lease.id);
+    const payments = allPayments.filter(p => p.lease_id === lease.id);
 
     // 1. Calculate Paid Amount
     const paidAmount = payments.reduce((sum, p) => sum + p.amount, 0);
     const lastPayment = payments.length > 0
-        ? payments.sort((a, b) => b.date.getTime() - a.date.getTime())[0].date
+        ? payments.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())[0].date
         : undefined;
 
-    // 2. Calculate Expected Rent (Accrued from Start to Today)
-    const now = new Date();
-    // Cap accrual at Lease End if it exists and is in the past
-    const accrualEnd = (lease.endDate && lease.endDate < now) ? lease.endDate : now;
-
-    let expectedRent = 0;
-    // Only calculate if the lease has actually started
-    if (lease.startDate <= accrualEnd) {
-        expectedRent = calculatePeriodExpectedRent([lease], lease.startDate, accrualEnd);
-    }
-
+    // 2. Calculate days since lease start
+    const leaseStart = new Date(lease.start_date);
+    leaseStart.setHours(0, 0, 0, 0);
+    
+    const today = new Date();
+    today.setHours(23, 59, 59, 999);
+    
+    // Cap at lease end if exists and is in the past
+    const leaseEnd = lease.end_date ? new Date(lease.end_date) : null;
+    const accrualEnd = (leaseEnd && leaseEnd < today) ? leaseEnd : today;
+    
+    // Calculate days since start
+    const daysSinceStart = Math.floor(
+        (accrualEnd.getTime() - leaseStart.getTime()) / (1000 * 60 * 60 * 24)
+    );
+    
+    // 3. Calculate complete 30-day periods
+    const completePeriods = Math.floor(daysSinceStart / 30);
+    
+    // 4. Expected rent = complete periods × monthly rent
+    const expectedRent = completePeriods * lease.rent_amount;
+    
+    // 5. Calculate next due date
+    const nextDueDate = new Date(leaseStart.getTime() + ((completePeriods + 1) * 30 * 24 * 60 * 60 * 1000));
+    
+    // 6. Calculate days until next due
+    const daysUntilNextDue = Math.max(0, Math.floor(
+        (nextDueDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24)
+    ));
+    
+    // 7. Calculate balance
     const balance = expectedRent - paidAmount;
-
+    
+    // 8. Determine if overdue
+    const isOverdue = today > nextDueDate && balance > 0;
+    const daysOverdue = isOverdue 
+        ? Math.floor((today.getTime() - nextDueDate.getTime()) / (1000 * 60 * 60 * 24))
+        : 0;
+    
+    // 9. Determine status
     let status: LeaseFinancials['status'] = 'paid';
-    if (balance > 5) status = 'overdue'; // Increased epsilon slightly for float buffer
+    if (balance > 5) status = 'overdue';
     else if (balance < -5) status = 'credit';
     else status = 'paid';
 
@@ -111,13 +86,30 @@ export function calculateLeaseFinancialsSync(lease: Lease, allPayments: Payment[
         expectedRent,
         paidAmount,
         balance,
-        lastPaymentDate: lastPayment,
+        completePeriods,
+        nextDueDate,
+        daysSinceStart,
+        daysUntilNextDue,
+        isOverdue,
+        daysOverdue,
+        lastPaymentDate: lastPayment ? new Date(lastPayment) : undefined,
         status
     };
 }
 
+/**
+ * Alias for backward compatibility
+ */
+export function calculateLeaseFinancialsSync(lease: Lease, allPayments: Payment[]): LeaseFinancials {
+    return calculate30DayCycleFinancials(lease, allPayments);
+}
+
 // Async wrapper for convenience
 export async function calculateLeaseFinancials(lease: Lease): Promise<LeaseFinancials> {
-    const payments = await db.payments.where({ leaseId: lease.id }).toArray();
-    return calculateLeaseFinancialsSync(lease, payments);
+    const { data: payments } = await supabase
+        .from('payments')
+        .select('*')
+        .eq('lease_id', lease.id);
+
+    return calculate30DayCycleFinancials(lease, payments || []);
 }

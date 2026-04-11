@@ -1,66 +1,113 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useLiveQuery } from 'dexie-react-hooks';
-import { db } from '../lib/db';
+import { supabase } from '../lib/supabase';
+import type { Database } from '../lib/database.types';
 import { CreditCard, Home, TrendingUp, Download, AlertCircle, ArrowUpRight, ArrowDownLeft, Activity, ChevronLeft, ChevronRight, Calendar } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { formatDistanceToNow, startOfMonth, endOfMonth, addMonths, subMonths, format } from 'date-fns';
 import EmptyState from '../components/EmptyState';
-import { calculatePeriodExpectedRent } from '../lib/financialUtils';
-
+type Payment = Database['public']['Tables']['payments']['Row'];
+type Expense = Database['public']['Tables']['expenses']['Row'];
+type Unit = Database['public']['Tables']['units']['Row'];
+type Lease = Database['public']['Tables']['leases']['Row'];
+type Maintenance = Database['public']['Tables']['maintenance']['Row'];
 
 export default function Dashboard() {
     const { t } = useTranslation();
     const { user } = useAuth();
 
-    // Month State
     const [currentMonth, setCurrentMonth] = useState(new Date());
+    const [payments, setPayments] = useState<Payment[]>([]);
+    const [expenses, setExpenses] = useState<Expense[]>([]);
+    const [units, setUnits] = useState<Unit[]>([]);
+    const [leases, setLeases] = useState<Lease[]>([]);
+    const [maintenance, setMaintenance] = useState<Maintenance[]>([]);
+    const [loading, setLoading] = useState(true);
 
-    const payments = useLiveQuery(() => db.payments.toArray());
-    const expenses = useLiveQuery(() => db.expenses.toArray());
-    const units = useLiveQuery(() => db.units.toArray());
-    const leases = useLiveQuery(() => db.leases.toArray());
-    const maintenance = useLiveQuery(() => db.maintenance.toArray());
+    useEffect(() => {
+        fetchData();
+    }, []);
+
+    async function fetchData() {
+        setLoading(true);
+
+        const [paymentsRes, expensesRes, unitsRes, leasesRes, maintenanceRes] = await Promise.all([
+            supabase.from('payments').select('*'),
+            supabase.from('expenses').select('*'),
+            supabase.from('units').select('*'),
+            supabase.from('leases').select('*'),
+            supabase.from('maintenance').select('*')
+        ]);
+
+        if (paymentsRes.data) setPayments(paymentsRes.data);
+        if (expensesRes.data) setExpenses(expensesRes.data);
+        if (unitsRes.data) setUnits(unitsRes.data);
+        if (leasesRes.data) setLeases(leasesRes.data);
+        if (maintenanceRes.data) setMaintenance(maintenanceRes.data);
+
+        setLoading(false);
+    }
 
     const periodStart = startOfMonth(currentMonth);
     const periodEnd = endOfMonth(currentMonth);
-    // Set time to end of day for inclusive check
     periodEnd.setHours(23, 59, 59, 999);
     periodStart.setHours(0, 0, 0, 0);
 
-    // --- Metrics Calculations (for Selected Month) ---
+    // Expected Rent (30-Day Cycle)
+    const expectedRent = useMemo(() => {
+        if (leases.length === 0) return 0;
+        
+        let total = 0;
+        leases.forEach(lease => {
+            const leaseStart = new Date(lease.start_date);
+            leaseStart.setHours(0, 0, 0, 0);
+            const leaseEnd = lease.end_date ? new Date(lease.end_date) : null;
+            if (leaseEnd) leaseEnd.setHours(23, 59, 59, 999);
+            
+            // Calculate overlap between lease period and report period
+            const periodStartCalc = leaseStart > periodStart ? leaseStart : periodStart;
+            const periodEndCalc = (leaseEnd && leaseEnd < periodEnd) ? leaseEnd : periodEnd;
+            
+            if (periodStartCalc <= periodEndCalc) {
+                // Calculate days in the report period that the lease was active
+                const daysInPeriod = Math.floor((periodEndCalc.getTime() - periodStartCalc.getTime()) / (1000 * 60 * 60 * 24)) + 1;
+                // Calculate expected rent based on 30-day cycles
+                const completePeriods = Math.floor(daysInPeriod / 30);
+                total += completePeriods * lease.rent_amount;
+            }
+        });
+        
+        return total;
+    }, [leases, periodStart, periodEnd]);
 
-    // 1. Expected Rent (Daily Accrual)
-    const expectedRent = leases ? calculatePeriodExpectedRent(leases, periodStart, periodEnd) : 0;
+    // Collected Rent
+    const collectedRent = payments.filter(p =>
+        p.type === 'rent' && new Date(p.date) >= periodStart && new Date(p.date) <= periodEnd
+    ).reduce((sum, p) => sum + p.amount, 0);
 
-    // 2. Collected Rent
-    const collectedRent = payments?.filter(p =>
-        p.type === 'rent' && p.date >= periodStart && p.date <= periodEnd
-    ).reduce((sum, p) => sum + p.amount, 0) || 0;
+    // Expenses
+    const periodExpenses = expenses.filter(e =>
+        (e.status === 'approved' || e.status === 'paid') && new Date(e.date) >= periodStart && new Date(e.date) <= periodEnd
+    ).reduce((sum, e) => sum + e.amount, 0);
 
-    // 3. Expenses
-    const periodExpenses = expenses?.filter(e =>
-        (e.status === 'approved' || e.status === 'paid') && e.date >= periodStart && e.date <= periodEnd
-    ).reduce((sum, e) => sum + e.amount, 0) || 0;
-
-    // 4. Net Income & Outstanding
+    // Net Income & Outstanding
     const netIncome = collectedRent - periodExpenses;
-    const outstanding = expectedRent - collectedRent; // Period specific
+    const outstanding = expectedRent - collectedRent;
 
-    // 5. Occupancy (Snapshot at End of Month)
-    // A unit is occupied if it has an active lease on the LAST DAY of the selected month
-    const totalUnits = units?.length || 0;
+    // Occupancy
+    const totalUnits = units.length;
 
     const occupiedCount = useMemo(() => {
-        if (!leases || !units) return 0;
+        if (leases.length === 0 || units.length === 0) return 0;
 
-        // Find leases active on 'periodEnd'
         const activeLeaseIds = leases.filter(l => {
-            const start = new Date(l.startDate); start.setHours(0, 0, 0, 0);
-            const end = l.endDate ? new Date(l.endDate) : null; if (end) end.setHours(23, 59, 59, 999);
+            const start = new Date(l.start_date);
+            start.setHours(0, 0, 0, 0);
+            const end = l.end_date ? new Date(l.end_date) : null;
+            if (end) end.setHours(23, 59, 59, 999);
 
             return start <= periodEnd && (!end || end >= periodEnd);
-        }).map(l => l.unitId);
+        }).map(l => l.unit_id);
 
         const uniqueOccupiedUnits = new Set(activeLeaseIds);
         return uniqueOccupiedUnits.size;
@@ -68,13 +115,12 @@ export default function Dashboard() {
 
     const occupancyRate = totalUnits ? Math.round((occupiedCount / totalUnits) * 100) : 0;
 
-
-    // --- Cards Config ---
+    // Cards Config
     const cards = [
         {
             label: 'Expected Rent',
             value: `${Math.round(expectedRent).toLocaleString()} ETB`,
-            sub: 'Daily Accrual',
+            sub: '30-Day Cycle',
             icon: Calendar,
             color: 'var(--color-primary)',
             bg: 'hsla(210, 80%, 40%, 0.1)'
@@ -99,7 +145,7 @@ export default function Dashboard() {
         cards.push({
             label: 'Expenses',
             value: `${periodExpenses.toLocaleString()} ETB`,
-            icon: TrendingUp, // Down trend visually but using generic icon
+            icon: TrendingUp,
             color: 'var(--color-danger)',
             bg: 'hsla(350, 60%, 45%, 0.1)'
         });
@@ -120,11 +166,10 @@ export default function Dashboard() {
         });
     }
 
-    // --- Activity Feed (All Time or Month? request implied month view focused, but activity feed usually helpful for recent context regardless of month. Let's keep it 'Recent' for now, or filter? 
-    // "Owner Dashboard shows period performance only". Let's filter activity feed to selected month too for consistency.
+    // Activity Feed
     const activityFeed = useMemo(() => {
         const allActivities = [
-            ...(payments || []).filter(p => p.date >= periodStart && p.date <= periodEnd).map(p => ({
+            ...payments.filter(p => new Date(p.date) >= periodStart && new Date(p.date) <= periodEnd).map(p => ({
                 id: p.id,
                 type: 'payment',
                 date: new Date(p.date),
@@ -132,7 +177,7 @@ export default function Dashboard() {
                 amount: p.amount,
                 details: `Method: ${p.method}`
             })),
-            ...(expenses || []).filter(e => e.date >= periodStart && e.date <= periodEnd).map(e => ({
+            ...expenses.filter(e => new Date(e.date) >= periodStart && new Date(e.date) <= periodEnd).map(e => ({
                 id: e.id,
                 type: 'expense',
                 date: new Date(e.date),
@@ -140,7 +185,7 @@ export default function Dashboard() {
                 amount: e.amount,
                 details: e.category
             })),
-            ...(maintenance || []).filter(m => m.date >= periodStart && m.date <= periodEnd).map(m => ({
+            ...maintenance.filter(m => new Date(m.date) >= periodStart && new Date(m.date) <= periodEnd).map(m => ({
                 id: m.id,
                 type: 'maintenance',
                 date: new Date(m.date),
@@ -152,6 +197,16 @@ export default function Dashboard() {
 
         return allActivities.sort((a, b) => b.date.getTime() - a.date.getTime());
     }, [payments, expenses, maintenance, periodStart, periodEnd]);
+
+    if (loading) {
+        return (
+            <div className="container main-content">
+                <div style={{ textAlign: 'center', padding: 'var(--space-8)', color: 'var(--color-text-muted)' }}>
+                    Loading dashboard...
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div className="container main-content">
@@ -215,9 +270,7 @@ export default function Dashboard() {
 
             <h2 style={{ fontSize: '1.2rem', marginBottom: 'var(--space-3)' }}>Activity ({format(currentMonth, 'MMMM')})</h2>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
-                {(!payments || !expenses || !maintenance) ? (
-                    <div style={{ padding: '20px', textAlign: 'center', color: 'var(--color-text-muted)' }}>Loading activity...</div>
-                ) : activityFeed.length === 0 ? (
+                {activityFeed.length === 0 ? (
                     <EmptyState
                         title="No Activity in Period"
                         description="No payments, expenses, or maintenance records found for this month."

@@ -1,47 +1,111 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useLiveQuery } from 'dexie-react-hooks';
-import { db } from '../lib/db';
+import { supabase } from '../lib/supabase';
+import { insertMaintenance, updateMaintenance } from '../lib/supabaseHelpers';
+import type { Database } from '../lib/database.types';
 import { v4 as uuidv4 } from 'uuid';
 import { Plus, Wrench } from 'lucide-react';
 import EmptyState from '../components/EmptyState';
 
+type Maintenance = Database['public']['Tables']['maintenance']['Row'];
+type Unit = Database['public']['Tables']['units']['Row'];
+
 export default function Maintenance() {
     const { t } = useTranslation();
-    const maintenance = useLiveQuery(() => db.maintenance.toArray());
-    const units = useLiveQuery(() => db.units.toArray());
-
+    const [maintenance, setMaintenance] = useState<Maintenance[]>([]);
+    const [units, setUnits] = useState<Unit[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
     const [showAddForm, setShowAddForm] = useState(false);
     const [newIssue, setNewIssue] = useState({ unitId: '', description: '' });
+
+    useEffect(() => {
+        fetchData();
+    }, []);
+
+    async function fetchData() {
+        setLoading(true);
+        setError(null);
+
+        const [maintenanceResult, unitsResult] = await Promise.all([
+            supabase.from('maintenance').select('*').order('date', { ascending: false }),
+            supabase.from('units').select('*').order('unit_number')
+        ]);
+
+        if (maintenanceResult.error) {
+            setError(maintenanceResult.error.message);
+        } else if (unitsResult.error) {
+            setError(unitsResult.error.message);
+        } else {
+            setMaintenance(maintenanceResult.data || []);
+            setUnits(unitsResult.data || []);
+        }
+
+        setLoading(false);
+    }
 
     const handleAddIssue = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!newIssue.unitId || !newIssue.description) return;
 
         try {
-            await db.maintenance.add({
+            const { error: insertError } = await insertMaintenance({
                 id: uuidv4(),
-                unitId: newIssue.unitId,
+                unit_id: newIssue.unitId,
                 description: newIssue.description,
                 status: 'open',
-                date: new Date(),
+                date: new Date().toISOString(),
                 synced: false
             });
-            setNewIssue({ unitId: '', description: '' });
-            setShowAddForm(false);
+
+            if (insertError) {
+                console.error('Failed to add issue:', insertError);
+                setError(insertError.message);
+            } else {
+                setNewIssue({ unitId: '', description: '' });
+                setShowAddForm(false);
+                fetchData();
+            }
         } catch (error) {
             console.error('Failed to add issue:', error);
         }
     };
 
     const updateStatus = async (id: string, status: 'open' | 'in_progress' | 'resolved') => {
-        await db.maintenance.update(id, { status });
+        const { error: updateError } = await updateMaintenance(id, { status });
+
+        if (updateError) {
+            console.error('Failed to update status:', updateError);
+            setError(updateError.message);
+        } else {
+            fetchData();
+        }
     };
 
     const getUnitName = (id: string) => {
-        const unit = units?.find(u => u.id === id);
-        return unit ? `Unit ${unit.unitNumber}` : 'Unknown Unit';
+        const unit = units.find(u => u.id === id);
+        return unit ? `Unit ${unit.unit_number}` : 'Unknown Unit';
     };
+
+    if (loading) {
+        return (
+            <div className="container main-content">
+                <div style={{ textAlign: 'center', padding: 'var(--space-8)', color: 'var(--color-text-muted)' }}>
+                    Loading maintenance issues...
+                </div>
+            </div>
+        );
+    }
+
+    if (error) {
+        return (
+            <div className="container main-content">
+                <div style={{ textAlign: 'center', padding: 'var(--space-8)', color: 'var(--color-danger)' }}>
+                    Error: {error}
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div className="container main-content">
@@ -63,7 +127,7 @@ export default function Maintenance() {
                             required
                         >
                             <option value="">Select Unit</option>
-                            {units?.map(u => <option key={u.id} value={u.id}>Unit {u.unitNumber}</option>)}
+                            {units.map(u => <option key={u.id} value={u.id}>Unit {u.unit_number}</option>)}
                         </select>
 
                         <textarea
@@ -84,9 +148,7 @@ export default function Maintenance() {
             )}
 
             <div style={{ display: 'grid', gap: 'var(--space-3)' }}>
-                {!maintenance ? (
-                    <div style={{ textAlign: 'center', padding: '20px' }}>Loading...</div>
-                ) : maintenance.length === 0 ? (
+                {maintenance.length === 0 ? (
                     <EmptyState
                         title="No Maintenance Issues"
                         description="Everything is running smoothly! Log an issue if something needs attention."
@@ -95,7 +157,7 @@ export default function Maintenance() {
                         onAction={() => setShowAddForm(true)}
                     />
                 ) : (
-                    maintenance.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()).map((issue) => (
+                    maintenance.map((issue) => (
                         <div key={issue.id} className="card">
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: '8px' }}>
                                 <div style={{ display: 'flex', gap: 'var(--space-3)' }}>
@@ -114,7 +176,7 @@ export default function Maintenance() {
                                         } />
                                     </div>
                                     <div>
-                                        <h3 style={{ fontSize: '1.1rem', marginBottom: '2px' }}>{getUnitName(issue.unitId)}</h3>
+                                        <h3 style={{ fontSize: '1.1rem', marginBottom: '2px' }}>{getUnitName(issue.unit_id)}</h3>
                                         <p style={{ fontSize: '0.95rem', color: 'var(--color-text-main)' }}>{issue.description}</p>
                                     </div>
                                 </div>

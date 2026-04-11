@@ -1,33 +1,75 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useLiveQuery } from 'dexie-react-hooks';
-import { db } from '../lib/db';
+import { supabase } from '../lib/supabase';
+import { insertTenant } from '../lib/supabaseHelpers';
+import type { Database } from '../lib/database.types';
 import { v4 as uuidv4 } from 'uuid';
 import { Plus, User, Phone, Trash2, Wallet } from 'lucide-react';
 import { calculateLeaseFinancialsSync } from '../lib/financialUtils';
 
+type Tenant = Database['public']['Tables']['tenants']['Row'];
+type Lease = Database['public']['Tables']['leases']['Row'];
+type Payment = Database['public']['Tables']['payments']['Row'];
+
 export default function Tenants() {
     const { t } = useTranslation();
-    const tenants = useLiveQuery(() => db.tenants.toArray());
-    const leases = useLiveQuery(() => db.leases.toArray());
-    const payments = useLiveQuery(() => db.payments.toArray());
+    const [tenants, setTenants] = useState<Tenant[]>([]);
+    const [leases, setLeases] = useState<Lease[]>([]);
+    const [payments, setPayments] = useState<Payment[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
     const [showAddForm, setShowAddForm] = useState(false);
     const [newTenant, setNewTenant] = useState({ name: '', phone: '' });
+
+    useEffect(() => {
+        fetchData();
+    }, []);
+
+    async function fetchData() {
+        setLoading(true);
+        setError(null);
+
+        const [tenantsResult, leasesResult, paymentsResult] = await Promise.all([
+            supabase.from('tenants').select('*').order('name'),
+            supabase.from('leases').select('*'),
+            supabase.from('payments').select('*')
+        ]);
+
+        if (tenantsResult.error) {
+            setError(tenantsResult.error.message);
+        } else if (leasesResult.error) {
+            setError(leasesResult.error.message);
+        } else if (paymentsResult.error) {
+            setError(paymentsResult.error.message);
+        } else {
+            setTenants(tenantsResult.data || []);
+            setLeases(leasesResult.data || []);
+            setPayments(paymentsResult.data || []);
+        }
+
+        setLoading(false);
+    }
 
     const handleAddTenant = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!newTenant.name) return;
 
         try {
-            await db.tenants.add({
+            const { error: insertError } = await insertTenant({
                 id: uuidv4(),
                 name: newTenant.name,
                 phone: newTenant.phone,
-                status: 'active',
-                balance: 0
+                status: 'active'
             });
-            setNewTenant({ name: '', phone: '' });
-            setShowAddForm(false);
+
+            if (insertError) {
+                console.error('Failed to add tenant:', insertError);
+                setError(insertError.message);
+            } else {
+                setNewTenant({ name: '', phone: '' });
+                setShowAddForm(false);
+                fetchData();
+            }
         } catch (error) {
             console.error('Failed to add tenant:', error);
         }
@@ -35,13 +77,22 @@ export default function Tenants() {
 
     const handleDelete = async (id: string) => {
         if (confirm('Delete this tenant?')) {
-            await db.tenants.delete(id);
+            const { error: deleteError } = await supabase
+                .from('tenants')
+                .delete()
+                .eq('id', id);
+
+            if (deleteError) {
+                console.error('Failed to delete tenant:', deleteError);
+                setError(deleteError.message);
+            } else {
+                fetchData();
+            }
         }
     };
 
     const getTenantBalance = (tenantId: string) => {
-        if (!leases || !payments) return 0;
-        const tenantLeases = leases.filter(l => l.tenantId === tenantId);
+        const tenantLeases = leases.filter(l => l.tenant_id === tenantId);
         let totalBalance = 0;
         tenantLeases.forEach(l => {
             const stats = calculateLeaseFinancialsSync(l, payments);
@@ -49,6 +100,26 @@ export default function Tenants() {
         });
         return totalBalance;
     };
+
+    if (loading) {
+        return (
+            <div className="container main-content">
+                <div style={{ textAlign: 'center', padding: 'var(--space-8)', color: 'var(--color-text-muted)' }}>
+                    Loading tenants...
+                </div>
+            </div>
+        );
+    }
+
+    if (error) {
+        return (
+            <div className="container main-content">
+                <div style={{ textAlign: 'center', padding: 'var(--space-8)', color: 'var(--color-danger)' }}>
+                    Error: {error}
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div className="container main-content">
@@ -97,7 +168,7 @@ export default function Tenants() {
             )}
 
             <div style={{ display: 'grid', gap: 'var(--space-3)' }}>
-                {tenants?.map((tenant) => {
+                {tenants.map((tenant) => {
                     const balance = getTenantBalance(tenant.id);
                     return (
                         <div key={tenant.id} className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -126,7 +197,7 @@ export default function Tenants() {
                         </div>
                     );
                 })}
-                {tenants?.length === 0 && !showAddForm && (
+                {tenants.length === 0 && !showAddForm && (
                     <div style={{ textAlign: 'center', padding: 'var(--space-8)', color: 'var(--color-text-muted)' }}>
                         <p>No tenants yet.</p>
                     </div>

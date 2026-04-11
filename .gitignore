@@ -11,6 +11,9 @@ node_modules
 dist
 dist-ssr
 *.local
+.env
+.env.*
+!.env.example
 
 # Editor directories and files
 .vscode/*
@@ -22,3 +25,33 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# AI / IDE agent tool folders
+.agent/
+.agents/
+.augment/
+.claude/
+.cline/
+.codebuddy/
+.crush/
+.cursor/
+.gemini/
+.github/
+.iflow/
+.kiro/
+.ona/
+.opencode/
+.pi/
+.qoder/
+.qwen/
+.roo/
+.rovodev/
+.trae/
+.windsurf/
+
+# BMad workflow artifacts
+_bmad/
+_bmad-output/
+
+# Duplicate / stray folders
+y/

@@ -1,56 +1,99 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useLiveQuery } from 'dexie-react-hooks';
-import { db } from '../lib/db';
-import { calculatePeriodExpectedRent } from '../lib/financialUtils';
+import { supabase } from '../lib/supabase';
+import type { Database } from '../lib/database.types';
 import { startOfMonth, endOfMonth, format } from 'date-fns';
 import { TrendingUp, TrendingDown, DollarSign, Calendar, AlertCircle, Filter, X } from 'lucide-react';
 
+type Lease = Database['public']['Tables']['leases']['Row'];
+type Payment = Database['public']['Tables']['payments']['Row'];
+type Expense = Database['public']['Tables']['expenses']['Row'];
+type Unit = Database['public']['Tables']['units']['Row'];
 
 export default function Reports() {
     const { t } = useTranslation();
 
-    // Filters State
     const [startDate, setStartDate] = useState(format(startOfMonth(new Date()), 'yyyy-MM-dd'));
     const [endDate, setEndDate] = useState(format(endOfMonth(new Date()), 'yyyy-MM-dd'));
     const [selectedUnitType, setSelectedUnitType] = useState<string>('all');
     const [paymentStatus, setPaymentStatus] = useState<'all' | 'paid' | 'unpaid'>('all');
     const [selectedFloor, setSelectedFloor] = useState<string>('all');
 
-    const leases = useLiveQuery(() => db.leases.toArray());
-    const payments = useLiveQuery(() => db.payments.toArray());
-    const expenses = useLiveQuery(() => db.expenses.toArray());
-    const units = useLiveQuery(() => db.units.toArray());
-    const tenants = useLiveQuery(() => db.tenants.toArray());
+    const [leases, setLeases] = useState<Lease[]>([]);
+    const [payments, setPayments] = useState<Payment[]>([]);
+    const [expenses, setExpenses] = useState<Expense[]>([]);
+    const [units, setUnits] = useState<Unit[]>([]);
+    const [loading, setLoading] = useState(true);
 
-    if (!leases || !payments || !expenses || !units || !tenants) return <div>Loading...</div>;
+    useEffect(() => {
+        fetchData();
+    }, []);
 
-    // --- Calculation Logic ---
-    const start = new Date(startDate); start.setHours(0, 0, 0, 0);
-    const end = new Date(endDate); end.setHours(23, 59, 59, 999);
+    async function fetchData() {
+        setLoading(true);
 
-    // 1. Filter Units first (Structural Filter)
+        const [leasesRes, paymentsRes, expensesRes, unitsRes] = await Promise.all([
+            supabase.from('leases').select('*'),
+            supabase.from('payments').select('*'),
+            supabase.from('expenses').select('*'),
+            supabase.from('units').select('*')
+        ]);
+
+        if (leasesRes.data) setLeases(leasesRes.data);
+        if (paymentsRes.data) setPayments(paymentsRes.data);
+        if (expensesRes.data) setExpenses(expensesRes.data);
+        if (unitsRes.data) setUnits(unitsRes.data);
+
+        setLoading(false);
+    }
+
+    if (loading) {
+        return (
+            <div className="container main-content">
+                <div style={{ textAlign: 'center', padding: 'var(--space-8)', color: 'var(--color-text-muted)' }}>
+                    Loading reports...
+                </div>
+            </div>
+        );
+    }
+
+    const start = new Date(startDate);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(endDate);
+    end.setHours(23, 59, 59, 999);
+
     const availableFloors = Array.from(new Set(units.map(u => u.floor))).sort();
 
-
     const filteredUnits = units.filter(u => {
-        if (selectedUnitType !== 'all' && u.unitType !== selectedUnitType) return false;
+        if (selectedUnitType !== 'all' && u.unit_type !== selectedUnitType) return false;
         if (selectedFloor !== 'all' && u.floor !== selectedFloor) return false;
         return true;
     });
     const filteredUnitIds = new Set(filteredUnits.map(u => u.id));
 
-    // 2. Calculate Financials PER LEASE first (to support Status filter)
-    // We only care about leases linked to our filtered units
-    const relevantLeases = leases.filter(l => filteredUnitIds.has(l.unitId));
+    const relevantLeases = leases.filter(l => filteredUnitIds.has(l.unit_id));
 
     const leaseStats = relevantLeases.map(lease => {
-        // Expected Rent (Daily Accrual)
-        const expected = calculatePeriodExpectedRent([lease], start, end);
+        const leaseStart = new Date(lease.start_date);
+        leaseStart.setHours(0, 0, 0, 0);
+        const leaseEnd = lease.end_date ? new Date(lease.end_date) : null;
+        if (leaseEnd) leaseEnd.setHours(23, 59, 59, 999);
+        
+        // Calculate overlap between lease period and report period
+        const periodStart = leaseStart > start ? leaseStart : start;
+        const periodEnd = (leaseEnd && leaseEnd < end) ? leaseEnd : end;
+        
+        let expected = 0;
+        if (periodStart <= periodEnd) {
+            // Calculate days in the report period that the lease was active
+            const daysInPeriod = Math.floor((periodEnd.getTime() - periodStart.getTime()) / (1000 * 60 * 60 * 24)) + 1;
+            // Calculate expected rent based on 30-day cycles
+            const completePeriods = Math.floor(daysInPeriod / 30);
+            expected = completePeriods * lease.rent_amount;
+        }
 
-        // Collected Rent (Payments in range)
         const collected = payments
-            .filter(p => p.leaseId === lease.id && p.type === 'rent' && p.date >= start && p.date <= end)
+            .filter(p => p.lease_id === lease.id && p.type === 'rent' && new Date(p.date) >= start && new Date(p.date) <= end)
             .reduce((sum, p) => sum + p.amount, 0);
 
         const outstanding = expected - collected;
@@ -60,47 +103,36 @@ export default function Reports() {
             expected,
             collected,
             outstanding,
-            isPaid: outstanding <= 1, // Epsilon
+            isPaid: outstanding <= 1,
             isUnpaid: outstanding > 1
         };
     });
 
-    // 3. Apply Payment Status Filter
     const finalLeaseStats = leaseStats.filter(stat => {
-        // Optimization: If range has no expected rent and no payments, ignore?
-        // Maybe, but "Paid" filter usually implies "Fully Settled" or "No Debt".
-        // Let's stick to explicit choice.
-
         if (paymentStatus === 'paid') return stat.isPaid;
         if (paymentStatus === 'unpaid') return stat.isUnpaid;
         return true;
     });
 
-    // 4. Aggregate Totals
     const totalExpected = finalLeaseStats.reduce((sum, s) => sum + s.expected, 0);
     const totalCollected = finalLeaseStats.reduce((sum, s) => sum + s.collected, 0);
     const totalOutstanding = totalExpected - totalCollected;
 
-    // Expenses (Global within date range, optionally could filter by unit if data allowed, but currently global)
-    // If strict unit filter is on, expenses might be misleading if they aren't linked.
-    // For now, we show Accrued Expenses for the period globally, unless we want to hide them when unit filters are active?
-    // Let's show them but maybe add a note? Or just show global. The user asked for "Expenses inside range".
     const totalExpenses = expenses
-        .filter(e => (e.status === 'approved' || e.status === 'paid') && e.date >= start && e.date <= end)
+        .filter(e => (e.status === 'approved' || e.status === 'paid') && new Date(e.date) >= start && new Date(e.date) <= end)
         .reduce((sum, e) => sum + e.amount, 0);
 
     const netIncome = totalCollected - totalExpenses;
 
-    // --- Occupancy Stats (Snapshot at END of range) ---
-    // Only consider units passing the Unit/Floor filters
     const activeLeasesAtEnd = leases.filter(l => {
-        const leaseStart = new Date(l.startDate); leaseStart.setHours(0, 0, 0, 0);
-        const leaseEnd = l.endDate ? new Date(l.endDate) : null; if (leaseEnd) leaseEnd.setHours(23, 59, 59, 999);
+        const leaseStart = new Date(l.start_date);
+        leaseStart.setHours(0, 0, 0, 0);
+        const leaseEnd = l.end_date ? new Date(l.end_date) : null;
+        if (leaseEnd) leaseEnd.setHours(23, 59, 59, 999);
         return leaseStart <= end && (!leaseEnd || leaseEnd >= end);
     });
-    const occupiedUnitIds = new Set(activeLeasesAtEnd.map(l => l.unitId));
+    const occupiedUnitIds = new Set(activeLeasesAtEnd.map(l => l.unit_id));
 
-    // Count ONLY from filteredUnits
     const occupiedCount = filteredUnits.filter(u => occupiedUnitIds.has(u.id)).length;
     const totalFilteredUnits = filteredUnits.length;
     const vacantCount = totalFilteredUnits - occupiedCount;
@@ -177,7 +209,7 @@ export default function Reports() {
             }}>
                 {/* Expected */}
                 <div className="card">
-                    <div style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>Expected Rent (Daily Accrual)</div>
+                    <div style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>Expected Rent (30-Day Cycle)</div>
                     <div style={{ fontSize: '1.5rem', fontWeight: 700 }}>{Math.round(totalExpected).toLocaleString()} ETB</div>
                 </div>
 

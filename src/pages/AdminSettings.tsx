@@ -1,17 +1,45 @@
-import React, { useState } from 'react';
-import { useLiveQuery } from 'dexie-react-hooks';
-import { db } from '../lib/db';
+import React, { useState, useEffect } from 'react';
+import { supabase } from '../lib/supabase';
+import { insertUser } from '../lib/supabaseHelpers';
+import type { Database } from '../lib/database.types';
 import { v4 as uuidv4 } from 'uuid';
 import { useAuth } from '../context/AuthContext';
-import { Trash2, Plus, User as UserIcon, Shield, Database, RefreshCw } from 'lucide-react';
+import { Trash2, Plus, User as UserIcon, Shield, Database as DatabaseIcon, RefreshCw } from 'lucide-react';
+
+type User = Database['public']['Tables']['users']['Row'];
 
 export default function AdminSettings() {
     const { user } = useAuth();
-    const users = useLiveQuery(() => db.users.toArray());
+    const [users, setUsers] = useState<User[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
 
     const [newUser, setNewUser] = useState({ username: '', password: '', role: 'caretaker' as const, name: '' });
     const [showForm, setShowForm] = useState(false);
     const [generating, setGenerating] = useState(false);
+
+    useEffect(() => {
+        if (user?.role === 'owner') {
+            fetchUsers();
+        }
+    }, [user]);
+
+    async function fetchUsers() {
+        setLoading(true);
+        setError(null);
+
+        const { data, error: fetchError } = await supabase
+            .from('users')
+            .select('*')
+            .order('name');
+
+        if (fetchError) {
+            setError(fetchError.message);
+        } else {
+            setUsers(data || []);
+        }
+        setLoading(false);
+    }
 
     if (user?.role !== 'owner') {
         return <div className="container main-content">Access Denied</div>;
@@ -20,91 +48,106 @@ export default function AdminSettings() {
     const handleAddUser = async (e: React.FormEvent) => {
         e.preventDefault();
         try {
-            await db.users.add({
+            const { error: insertError } = await insertUser({
                 id: uuidv4(),
                 username: newUser.username,
-                passwordHash: newUser.password, // Simple storage for MVP
+                password_hash: newUser.password, // Simple storage for MVP
                 role: newUser.role,
                 name: newUser.name
             });
-            setNewUser({ username: '', password: '', role: 'caretaker', name: '' });
-            setShowForm(false);
+
+            if (insertError) {
+                alert('Error adding user (username likely exists)');
+            } else {
+                setNewUser({ username: '', password: '', role: 'caretaker', name: '' });
+                setShowForm(false);
+                fetchUsers();
+            }
         } catch (error) {
-            alert('Error adding user (username likely exists)');
+            alert('Error adding user');
         }
     };
 
     const handleDeleteUser = async (id: string) => {
         if (confirm('Are you sure you want to delete this user?')) {
-            await db.users.delete(id);
+            const { error: deleteError } = await supabase
+                .from('users')
+                .delete()
+                .eq('id', id);
+
+            if (deleteError) {
+                console.error('Failed to delete user:', deleteError);
+                setError(deleteError.message);
+            } else {
+                fetchUsers();
+            }
         }
     };
 
     const generateDemoData = async () => {
         setGenerating(true);
         try {
-            await db.transaction('rw', [db.buildings, db.units, db.tenants, db.leases, db.payments, db.expenses, db.maintenance], async () => {
-                // 1. Create Building
-                const bId = uuidv4();
-                await db.buildings.add({ id: bId, name: 'Luxury Heights', location: 'Addis Ababa, Bole' });
+            // 1. Create Building
+            const bId = uuidv4();
+            await supabase.from('buildings').insert({
+                id: bId,
+                name: 'Luxury Heights',
+                location: 'Addis Ababa, Bole'
+            } as any);
 
-                // 2. Create Units
-                const u1 = uuidv4(); const u2 = uuidv4(); const u3 = uuidv4(); const u4 = uuidv4();
-                await db.units.bulkAdd([
-                    { id: u1, buildingId: bId, unitNumber: '101', floor: '1', unitType: 'apartment', sizeSqm: 80, rentPricingType: 'fixed', rentAmount: 15000, status: 'occupied' },
-                    { id: u2, buildingId: bId, unitNumber: '102', floor: '1', unitType: 'apartment', sizeSqm: 85, rentPricingType: 'fixed', rentAmount: 18000, status: 'occupied' },
-                    { id: u3, buildingId: bId, unitNumber: '201', floor: '2', unitType: 'apartment', sizeSqm: 100, rentPricingType: 'fixed', rentAmount: 22000, status: 'vacant' },
-                    { id: u4, buildingId: bId, unitNumber: 'Shop-A', floor: 'Ground', unitType: 'shop', sizeSqm: 40, rentPricingType: 'per_sqm', rentAmount: 25000, status: 'maintenance' }
-                ]);
+            // 2. Create Units
+            const u1 = uuidv4(); const u2 = uuidv4(); const u3 = uuidv4(); const u4 = uuidv4();
+            await supabase.from('units').insert([
+                { id: u1, building_id: bId, unit_number: '101', floor: '1', unit_type: 'apartment', size_sqm: 80, rent_pricing_type: 'fixed', rent_amount: 15000, status: 'occupied' },
+                { id: u2, building_id: bId, unit_number: '102', floor: '1', unit_type: 'apartment', size_sqm: 85, rent_pricing_type: 'fixed', rent_amount: 18000, status: 'occupied' },
+                { id: u3, building_id: bId, unit_number: '201', floor: '2', unit_type: 'apartment', size_sqm: 100, rent_pricing_type: 'fixed', rent_amount: 22000, status: 'vacant' },
+                { id: u4, building_id: bId, unit_number: 'Shop-A', floor: 'Ground', unit_type: 'shop', size_sqm: 40, rent_pricing_type: 'per_sqm', rent_amount: 25000, status: 'maintenance' }
+            ] as any);
 
-                // 3. Create Tenants (Clean Identity Only)
-                const t1 = uuidv4(); const t2 = uuidv4();
-                await db.tenants.bulkAdd([
-                    { id: t1, name: 'Aman Tesfaye', phone: '+251911000000', status: 'active', balance: 0 },
-                    { id: t2, name: 'Sara Kebede', phone: '+251922000000', status: 'active', balance: -5000 }
-                ]);
+            // 3. Create Tenants
+            const t1 = uuidv4(); const t2 = uuidv4();
+            await supabase.from('tenants').insert([
+                { id: t1, name: 'Aman Tesfaye', phone: '+251911000000', status: 'active' },
+                { id: t2, name: 'Sara Kebede', phone: '+251922000000', status: 'active' }
+            ] as any);
 
-                // 4. Create Leases (Connecting Tenant -> Unit)
-                const l1 = uuidv4(); const l2 = uuidv4();
-                const now = new Date();
-                const lastMonth = new Date(); lastMonth.setMonth(now.getMonth() - 1);
+            // 4. Create Leases
+            const l1 = uuidv4(); const l2 = uuidv4();
+            const now = new Date();
+            const lastMonth = new Date(); lastMonth.setMonth(now.getMonth() - 1);
 
-                await db.leases.bulkAdd([
-                    {
-                        id: l1, tenantId: t1, unitId: u1,
-                        rentAmount: 15000, pricingType: 'fixed', sizeSqm: 80,
-                        startDate: lastMonth, endDate: new Date(now.getFullYear() + 1, now.getMonth(), 1),
-                        rentDueDay: 1, isActive: true
-                    },
-                    {
-                        id: l2, tenantId: t2, unitId: u2,
-                        rentAmount: 18000, pricingType: 'fixed', sizeSqm: 85,
-                        startDate: new Date(now.getFullYear(), 0, 1), endDate: new Date(now.getFullYear(), 12, 31),
-                        rentDueDay: 5, isActive: true
-                    }
-                ]);
+            await supabase.from('leases').insert([
+                {
+                    id: l1, tenant_id: t1, unit_id: u1,
+                    rent_amount: 15000, pricing_type: 'fixed', size_sqm: 80,
+                    start_date: lastMonth.toISOString(), end_date: new Date(now.getFullYear() + 1, now.getMonth(), 1).toISOString(),
+                    rent_due_day: 1, is_active: true
+                },
+                {
+                    id: l2, tenant_id: t2, unit_id: u2,
+                    rent_amount: 18000, pricing_type: 'fixed', size_sqm: 85,
+                    start_date: new Date(now.getFullYear(), 0, 1).toISOString(), end_date: new Date(now.getFullYear(), 12, 31).toISOString(),
+                    rent_due_day: 5, is_active: true
+                }
+            ] as any);
 
-                // Update Units to reflect occupancy (optional, but good for quick UI)
-                await db.units.update(u1, { currentTenantId: t1 });
-                await db.units.update(u2, { currentTenantId: t2 });
+            // 5. Create Payments
+            await supabase.from('payments').insert([
+                { id: uuidv4(), tenant_id: t1, unit_id: u1, lease_id: l1, amount: 15000, date: new Date(now.getTime() - 86400000 * 2).toISOString(), type: 'rent', method: 'bank_transfer', reference: 'TXN12345', input_date: Date.now(), synced: false },
+                { id: uuidv4(), tenant_id: t2, unit_id: u2, lease_id: l2, amount: 13000, date: new Date(now.getTime() - 86400000 * 5).toISOString(), type: 'rent', method: 'cash', reference: 'Reciept#001', input_date: Date.now(), synced: false }
+            ] as any);
 
-                // 5. Create Payments
-                await db.payments.bulkAdd([
-                    { id: uuidv4(), tenantId: t1, unitId: u1, leaseId: l1, amount: 15000, date: new Date(now.getTime() - 86400000 * 2), type: 'rent', method: 'bank_transfer', reference: 'TXN12345', inputDate: Date.now(), synced: false },
-                    { id: uuidv4(), tenantId: t2, unitId: u2, leaseId: l2, amount: 13000, date: new Date(now.getTime() - 86400000 * 5), type: 'rent', method: 'cash', reference: 'Reciept#001', inputDate: Date.now(), synced: false }
-                ]);
+            // 6. Create Expenses
+            await supabase.from('expenses').insert([
+                { id: uuidv4(), category: 'Utilities', description: 'Water Bill - Bole Branch', amount: 2500, date: new Date(now.getTime() - 86400000 * 1).toISOString(), status: 'paid', paid_by: 'Owner', vendor: 'Addis Water', deducted_from_rent: false, synced: false },
+                { id: uuidv4(), category: 'Maintenance', description: 'Broken Window Repair Unit 202', amount: 5500, date: new Date(now.getTime() - 86400000 * 10).toISOString(), status: 'approved', paid_by: 'Owner', vendor: 'GlassFix Pros', deducted_from_rent: false, synced: false }
+            ] as any);
 
-                // 6. Create Expenses
-                await db.expenses.bulkAdd([
-                    { id: uuidv4(), category: 'Utilities', description: 'Water Bill - Bole Branch', amount: 2500, date: new Date(now.getTime() - 86400000 * 1), status: 'paid', paidBy: 'Owner', vendor: 'Addis Water', deductedFromRent: false, synced: false },
-                    { id: uuidv4(), category: 'Maintenance', description: 'Broken Window Repair Unit 202', amount: 5500, date: new Date(now.getTime() - 86400000 * 10), status: 'approved', paidBy: 'Owner', vendor: 'GlassFix Pros', deductedFromRent: false, synced: false }
-                ]);
+            // 7. Maintenance
+            await supabase.from('maintenance').insert({
+                id: uuidv4(), unit_id: u4, status: 'in_progress', date: new Date().toISOString(), description: 'Painting and wall repair needed before new tenant.', synced: false
+            } as any);
 
-                // 7. Maintenance
-                await db.maintenance.add({
-                    id: uuidv4(), unitId: u4, status: 'in_progress', date: new Date(), description: 'Painting and wall repair needed before new tenant.', synced: false
-                });
-            });
             alert('Demo Data Generated Successfully! Go to Dashboard to see changes.');
         } catch (e) {
             console.error(e);
@@ -113,6 +156,26 @@ export default function AdminSettings() {
             setGenerating(false);
         }
     };
+
+    if (loading) {
+        return (
+            <div className="container main-content">
+                <div style={{ textAlign: 'center', padding: 'var(--space-8)', color: 'var(--color-text-muted)' }}>
+                    Loading users...
+                </div>
+            </div>
+        );
+    }
+
+    if (error) {
+        return (
+            <div className="container main-content">
+                <div style={{ textAlign: 'center', padding: 'var(--space-8)', color: 'var(--color-danger)' }}>
+                    Error: {error}
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div className="container main-content">
@@ -128,7 +191,7 @@ export default function AdminSettings() {
             <div className="card" style={{ marginBottom: 'var(--space-4)', background: 'linear-gradient(to right, hsla(35, 60%, 50%, 0.1), transparent)' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', marginBottom: 'var(--space-3)' }}>
                     <div style={{ padding: '8px', background: 'var(--color-primary)', borderRadius: '50%', color: 'white' }}>
-                        <Database size={20} />
+                        <DatabaseIcon size={20} />
                     </div>
                     <div>
                         <h3 style={{ fontSize: '1.1rem' }}>Demo Data</h3>
@@ -136,7 +199,7 @@ export default function AdminSettings() {
                     </div>
                 </div>
                 <button onClick={generateDemoData} disabled={generating} className="btn btn-secondary" style={{ width: '100%', borderColor: 'var(--color-primary)', color: 'var(--color-primary-hover)' }}>
-                    {generating ? <RefreshCw className="spin" size={18} /> : <Database size={18} />}
+                    {generating ? <RefreshCw className="spin" size={18} /> : <DatabaseIcon size={18} />}
                     {generating ? 'Generating...' : 'Generate Sample Portfolio'}
                 </button>
             </div>
@@ -177,7 +240,7 @@ export default function AdminSettings() {
             )}
 
             <div style={{ display: 'grid', gap: 'var(--space-3)' }}>
-                {users?.map(u => (
+                {users.map(u => (
                     <div key={u.id} className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <div style={{ display: 'flex', gap: 'var(--space-3)', alignItems: 'center' }}>
                             <div style={{
